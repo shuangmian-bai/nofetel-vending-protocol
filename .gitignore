@@ -1,0 +1,9 @@
+# 运行产物与临时文件（协议样本可入库，见 docs）
+data/export/
+.cache/
+config/.env
+.venv/
+__pycache__/
+*.pyc
+.env
+.idea/
