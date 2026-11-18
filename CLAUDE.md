@@ -21,7 +21,7 @@
 ### 1. 凭据边界（覆盖全局第 3 条，更严格）
 
 - `openId` / `sessionKey` / 任何 `payCode` **一律不进代码、不进 `.env`、不进日志、不进文档**；
-  只用 `vault` 名字引用，运行时通过 `VAULT_NOFETEL_OPENID` 注入。
+- 运行时通过环境变量 `VAULT_NOFETEL_OPENID` 注入（可用任意密钥库工具，见 README）。
 - 日志里出现 `open_id` 的字段必须脱敏：`NoftelClient.open_id` 已设 `repr=False`；
   不要新增任何会打印它的 `logger.info`。
 - 抓到的设备内存 / 报文里若含 openId，写入密钥库后**立即 shred 明文副本**。
@@ -47,6 +47,9 @@
 - **禁止提供"单独开柜"的命令行入口**，开柜只能由 `purchase_and_open` 在支付确认后触发。
 - 新增任何写接口，先加进 `NoftelClient.post` 的门禁，再写业务调用。
 - 金额闸门默认 50 元；调高必须在本文件写明理由与日期。
+- **交互向导与参数式命令必须共用同一编排链路**（`pyapp.purchase`）。
+  向导里的"输入 yes"只是参数式 `--confirm` 的交互形态，不得成为更宽松的旁路；
+  新增入口时同样受本条约束。向导改动必须同步 `tests/test_wizard.py`。
 
 ### 4. 设备副作用
 

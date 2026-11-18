@@ -65,33 +65,64 @@ class PurchaseResult:
     open_result: OpenResult | None
 
 
+def validate_cart(snap: DeviceSnapshot, cart: Mapping[int, int]) -> tuple[list[dict[str, Any]], float]:
+    """校验购物车并换算为下单 items。
+
+    cart: {cellId: 数量}。返回 (下单 items, 合计金额)。
+
+    逐个校验而不是整体校验，是为了在交互向导里能精确指出"哪一件有问题"。
+    """
+    if not cart:
+        raise RuntimeError("购物车是空的")
+
+    items: list[dict[str, Any]] = []
+    for cell_id, qty in cart.items():
+        if qty <= 0:
+            raise RuntimeError(f"货道 {cell_id} 的数量必须大于 0")
+        cell = snap.cell(cell_id)
+        if cell is None:
+            raise RuntimeError(f"货道 {cell_id} 不存在（本机共 {len(snap.cells)} 个货道）")
+        if cell.stock <= 0:
+            raise RuntimeError(f"货道 {cell_id}「{cell.name}」已售罄")
+        if qty > cell.stock:
+            raise RuntimeError(f"货道 {cell_id}「{cell.name}」库存不足：现有 {cell.stock}，要买 {qty}")
+        items.append(cell.to_order_item(qty))
+
+    return items, calculate_amount(items, snap.price_map())
+
+
 def purchase_and_open(
     client: NoftelClient,
     *,
-    cell_id: int,
+    cart: Mapping[int, int] | None = None,
+    cell_id: int | None = None,
     qty: int = 1,
     confirm: bool = False,
     do_open: bool = True,
     ble: BleOpener | None = None,
+    snap: DeviceSnapshot | None = None,
 ) -> PurchaseResult:
     """完整链路：下单 -> 预下单 -> 轮询支付 -> 开柜。
 
+    两种入参方式：
+      - cart={cellId: 数量}：购物车（交互向导用）
+      - cell_id + qty：单件（脚本调用用，等价于 cart={cell_id: qty}）
+
     任何一步不满足前置条件都抛错并中止，绝不"猜一个 payCode"去开柜。
     """
-    snap = snapshot(client)
+    if cart is None:
+        if cell_id is None:
+            raise RuntimeError("必须提供 cart 或 cell_id")
+        cart = {cell_id: qty}
+
+    snap = snap or snapshot(client)
     ok, reason = snap.device.can_purchase()
     if not ok:
         raise RuntimeError(reason)
 
-    cell = snap.cell(cell_id)
-    if cell is None:
-        raise RuntimeError(f"货道 {cell_id} 不存在（本机共 {len(snap.cells)} 个货道）")
-    if cell.stock <= 0:
-        raise RuntimeError(f"货道 {cell_id} 已售罄")
-
-    items = [cell.to_order_item(qty)]
-    amount = calculate_amount(items, snap.price_map())
-    logger.info("准备下单：货道 %d %s x%d，合计 %.2f 元", cell.cell_id, cell.name, qty, amount)
+    items, amount = validate_cart(snap, cart)
+    detail = "、".join(f"货道{c}:{n}件" for c, n in cart.items())
+    logger.info("准备下单：%s，合计 %.2f 元", detail, amount)
 
     order = create_order(client, items, amount=amount, confirm=confirm)
     logger.info("订单已创建：%s", order.order_id)

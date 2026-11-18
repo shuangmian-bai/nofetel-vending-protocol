@@ -18,6 +18,7 @@ import os
 import sys
 from pathlib import Path
 
+from pyapp.cli.wizard import interactive_main
 from pyapp.api.client import ApiError, ConfirmRequired, NoftelConfig
 from pyapp.api.client import NoftelClient
 from pyapp.pay.order import get_pay_status
@@ -54,7 +55,11 @@ def _parser() -> argparse.ArgumentParser:
         help="设备主键，覆盖 .env 与环境变量（优先级：本参数 > 环境变量 > .env）",
     )
     p.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # 不指定子命令时进入交互式向导（推荐给人工使用）；
+    # 指定子命令则是参数式调用（给脚本与复现用）。
+    sub = p.add_subparsers(dest="cmd", required=False)
+
+    sub.add_parser("interactive", help="交互式购物：浏览商品 -> 加购物车 -> 结算 -> 支付 -> 开柜")
 
     sub.add_parser("info", help="查看设备型号 / 归属 / 状态（只读）")
     sub.add_parser("cells", help="列出货道商品与价格（只读）")
@@ -149,6 +154,13 @@ def main(argv: list[str] | None = None) -> int:
                 print("[失败] 写操作必须有身份，请先用 vault use 注入 openId", file=sys.stderr)
                 return 2
         with NoftelClient(config) as client:
+            if args.cmd in (None, "interactive"):
+                # 交互式向导是写操作路径，必须有身份
+                if not has_openid:
+                    print("[失败] 交互式下单需要身份，请先注入 openId 再运行", file=sys.stderr)
+                    return 2
+                return interactive_main(client)
+
             handlers = {
                 "info": lambda: cmd_info(client),
                 "cells": lambda: cmd_cells(client),
