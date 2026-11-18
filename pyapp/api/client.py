@@ -58,9 +58,12 @@ class NoftelConfig:
     max_order_amount: float = 50.0
     pay_poll_interval: float = 1.5
     pay_poll_max: int = 100
-    ble_service: str = "0000AE01-0000-1000-8000-00805F9B34FB"
-    ble_notify: str = "0000AE02-0000-1000-8000-00805F9B34FB"
-    ble_write: str = "0000AE01-0000-1000-8000-00805F9B34FB"
+    # BLE 特征默认留空 = 连接后自动发现（推荐）。
+    # 值来自 pages/index/index.js 的 getBLEDeviceServices 逻辑：
+    # 取 uuid 含 FEE0/FFF0/FF00/FE1691 的主服务，再在其中找带 notify 与 write 的特征。
+    ble_service: str = ""
+    ble_notify: str = ""
+    ble_write: str = ""
     # 身份标识（openId）。两种来源，按优先级：
     #   1) 环境变量 NOFETEL_OPENID（推荐：不落盘，适合共享机器）
     #   2) config/.env 里的 NOFETEL_OPENID（简单，但要求该文件的 chmod 真实生效）

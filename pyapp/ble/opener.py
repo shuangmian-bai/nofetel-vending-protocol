@@ -1,15 +1,22 @@
 """BLE 开柜（真机链路）。
 
-还原自 pages/index/index.js 的 notycharacteristicsId + writeBLECharacteristicValue：
+还原自 pages/index/index.js 的 getBLEDeviceServices / getBLEDeviceCharacteristics /
+notycharacteristicsId / writeBLECharacteristicValue：
 
-  1. 订阅 notify 特征（0000AE02），成功回调用 writeBLECharacteristicValue；
-  2. 把 payCode（十六进制串）按 40 字符一片写入 write 特征（0000AE01）；
-  3. 每片间隔 1 秒；尚未收到设备回的 notify 时重发，最多 3 次，超时报「开柜失败1003」。
+  1. 服务发现：遍历 isPrimary 服务，取 uuid 含 FEE0 / FFF0 / FF00 / FE1691 的那个；
+  2. 特征发现：在该服务内，带 notify 属性的记作通知通道，带 write 属性的记作写入通道；
+  3. 订阅通知后，把 payCode（十六进制串）按 40 字符一片写入；
+  4. 每片间隔 1 秒；未收到设备回包时重发，最多 3 次，超时报「开柜失败1003」。
+
+**关于 UUID：必须动态发现，不要硬编码。**
+小程序源码里出现的 AE01 / AE02 是部分机型的默认值，源码实际走的是上面的"发现"逻辑。
+实测某 N300-4 设备只暴露一个服务 FEE0、一个特征 FEE1（读写与通知同为一个特征），
+照抄 AE01/AE02 会得到 "Characteristic ... was not found"。
 
 关键约束：
 - payCode 只能来自服务端（getPayStatus 返回），本地不生成；
 - 部分机型用 hasPwd=1 走密码开柜，本模块只处理蓝牙机型（hasPwd=0）；
-- 设备侧不会主动告诉我们"开了"，判定依赖 notify 回包（handleOpenCellCallBack）。
+- 设备侧不会主动告诉我们"开了"，判定依赖 notify 回包。
 
 设备实测字段：blueToothId（如 <BLE_MAC_12HEX>）需拼成 BLE address 形态。
 """
@@ -31,8 +38,8 @@ MAX_RESEND = 3
 # 每片之间的等待（客户端 setTimeout 1000ms）
 CHUNK_INTERVAL = 1.0
 
-# 设备名/地址前缀约定：蓝MAC 以这些开头时走直连
-ADDRESS_PREFIXES = ("88", "AC", "C8", "D4", "DC")
+# 主服务识别关键字：与小程序 getBLEDeviceServices 的判定完全一致
+SERVICE_KEYWORDS = ("FEE0", "FFF0", "FF00", "FE1691")
 
 
 class BleError(RuntimeError):
@@ -79,12 +86,62 @@ class OpenResult:
 
 
 class BleOpener:
-    """蓝牙开柜器：连接 -> 订阅 notify -> 写 payCode。"""
+    """蓝牙开柜器：连接 -> 发现服务/特征 -> 订阅 notify -> 写 payCode。
 
-    def __init__(self, service_uuid: str, notify_uuid: str, write_uuid: str) -> None:
-        self.service_uuid = service_uuid
-        self.notify_uuid = notify_uuid
-        self.write_uuid = write_uuid
+    UUID 参数留空时按小程序逻辑**动态发现**（推荐）。
+    只有确认设备固定使用某组 UUID、且发现逻辑选不中时，才手工指定覆盖。
+    """
+
+    def __init__(self, service_uuid: str = "", notify_uuid: str = "", write_uuid: str = "") -> None:
+        self.service_uuid = service_uuid.strip()
+        self.notify_uuid = notify_uuid.strip()
+        self.write_uuid = write_uuid.strip()
+
+    @staticmethod
+    def _match_service(uuid: str) -> bool:
+        """与服务端无关的本地判定：与小程序的 FEE0/FFF0/FF00/FE1691 规则一致。"""
+        u = uuid.upper()
+        return any(k in u for k in SERVICE_KEYWORDS)
+
+    async def _discover(self, client: BleakClient) -> tuple[str, str, str]:
+        """发现可用的服务/通知/写入特征，返回 (service, notify, write) 的 uuid 字符串。"""
+        services = list(client.services)
+        if not services:
+            raise BleError("设备没有暴露任何 GATT 服务")
+
+        candidates = [svc for svc in services if self._match_service(svc.uuid)]
+        if self.service_uuid:  # 手工指定优先
+            candidates = [svc for svc in services if svc.uuid.lower() == self.service_uuid.lower()] or candidates
+        if not candidates:
+            logger.warning(
+                "没有匹配到已知服务关键字 %s，回退为遍历全部服务。实际服务：%s",
+                SERVICE_KEYWORDS,
+                [svc.uuid for svc in services],
+            )
+            candidates = services
+
+        for svc in candidates:
+            notify_ch = None
+            write_ch = None
+            for ch in svc.characteristics:
+                props = {p.lower() for p in ch.properties}
+                if notify_ch is None and ("notify" in props or "indicate" in props):
+                    notify_ch = ch
+                if write_ch is None and ("write" in props or "write-without-response" in props):
+                    write_ch = ch
+            if notify_ch and write_ch:
+                logger.info(
+                    "发现服务 %s：通知=%s 写入=%s",
+                    svc.uuid,
+                    notify_ch.uuid,
+                    write_ch.uuid,
+                )
+                return svc.uuid, notify_ch.uuid, write_ch.uuid
+
+        raise BleError(
+            "设备上没有同时支持 notify 与 write 的特征，无法开柜。"
+            f"已扫描服务：{[(svc.uuid, [ch.uuid for ch in svc.characteristics]) for svc in services]}"
+        )
 
     async def _find(self, address: str, timeout: float = 12.0) -> str:
         """确认设备可见并返回可连接的地址。"""
@@ -122,14 +179,15 @@ class BleOpener:
             if not client.is_connected:
                 raise BleError(f"连接设备 {address} 失败")
 
-            logger.info("已连接 %s，订阅 notify %s", address, self.notify_uuid)
-            await client.start_notify(self.notify_uuid, on_notify)
+            svc_uuid, notify_uuid, write_uuid = await self._discover(client)
+            logger.info("已连接 %s，服务 %s，订阅 notify %s", address, svc_uuid, notify_uuid)
+            await client.start_notify(notify_uuid, on_notify)
 
             frames = split_frames(pay_code_hex)
             sent = 0
             for attempt in range(1, MAX_RESEND + 1):
                 for idx, chunk in enumerate(frames):
-                    await client.write_gatt_char(self.write_uuid, hex_to_bytes(chunk), response=False)
+                    await client.write_gatt_char(write_uuid, hex_to_bytes(chunk), response=False)
                     sent += 1
                     logger.info("写入第 %d/%d 片：%s", idx + 1, len(frames), chunk)
                     await asyncio.sleep(CHUNK_INTERVAL)
@@ -142,7 +200,7 @@ class BleOpener:
                         raise BleError("连续 3 次未收到设备回包，判定开柜失败1003") from None
                     logger.warning("本轮未收到回包，重发第 %d 次", attempt + 1)
 
-            await client.stop_notify(self.notify_uuid)
+            await client.stop_notify(notify_uuid)
 
         return OpenResult(sent_frames=sent, notified=notified.is_set(), response_hex=response["hex"], address=address)
 
