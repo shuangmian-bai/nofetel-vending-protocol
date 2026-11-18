@@ -34,7 +34,7 @@
 
 ## 环境与运行
 
-依赖通过项目内 venv 隔离，不污染系统 Python：
+需要 Python 3.11+。蓝牙开柜依赖 `bleak`（Linux 需 BlueZ），只读功能不需要蓝牙。
 
 ```bash
 git clone https://github.com/shuangmian-bai/nofetel-vending-protocol.git
@@ -44,39 +44,66 @@ python3.11 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-需要 Python 3.11+ 与 BlueZ（蓝牙开柜依赖 `bleak`，只读功能不需要蓝牙）。
+### 配置
 
-凭据**不落盘、不进 `.env`**，运行时通过环境变量 `VAULT_NOFETEL_OPENID` 注入：
+全部配置集中在 `config/.env`，从模板复制后填写即可：
 
 ```bash
-# 任何能设环境变量的方式都行，例如：
-read -rs VAULT_NOFETEL_OPENID        # 交互式输入，不回显
-export VAULT_NOFETEL_OPENID
+cp config/.env.example config/.env
+chmod 600 config/.env        # 见下方安全提示
+${EDITOR:-vi} config/.env
+```
+
+`config/.env` 里至少需要两项：
+
+| 配置项 | 说明 | 从哪来 |
+|---|---|---|
+| `NOFETEL_DEVID` | 设备主键 | 设备二维码标签上的印字，或二维码 URL 的 `?devid=` 值 |
+| `NOFETEL_OPENID` | 微信用户身份 | 见下一节 |
+
+其余项（后端地址、版本号、金额上限、BLE 特征）有默认值，一般不用改。
+
+**优先级**：同一项在多处出现时按 `命令行参数 > 环境变量 > config/.env` 取值。
+所以临时换设备不必改文件：
+
+```bash
+.venv/bin/python main.py --dev-id <DEVICE_ID> info          # 命令行
+NOFETEL_DEVID=<DEVICE_ID> .venv/bin/python main.py info     # 环境变量
+.venv/bin/python main.py info                               # 用 config/.env
+```
+
+**安全提示**：`config/.env` 保存着 openId（等同账号身份）。请确认磁盘支持 POSIX 权限：
+
+```bash
+chmod 600 config/.env && stat -c %a config/.env    # 期望输出 600
+```
+
+若你的磁盘上 `chmod` 不生效（如 NTFS/exFAT 挂载，权限恒为 777），
+**不要把 openId 写进 `.env`**，改用环境变量：
+
+```bash
+read -rs NOFETEL_OPENID && export NOFETEL_OPENID   # 交互输入，不回显
 .venv/bin/python main.py info
 ```
 
-本工程在作者环境下使用密钥库工具注入（值只进子进程环境、不进 argv 与日志）：
+两种方式程序都支持，读不到 `.env` 里的值时会回落到环境变量。
 
-```bash
-vault use nofetel_openid -- .venv/bin/python main.py info
-```
+### 如何取得 openId
 
-没有该类工具时，务必确认 `.env` 所在磁盘的 `chmod 600` 真实生效再考虑落盘，
-否则就用上面的环境变量方式。判定方法与分级见 `docs/配置与凭据.md`。
+服务端只认 `user-id` 请求头，而它就是一个 openId。对**你自己的设备/账号**，
+用下面任一种方式获取：
 
-配置写在 `config/.env`（由 `config/.env.example` 复制），**只放非敏感参数**：
-设备标识、客户端常量、门禁阈值、BLE 特征。
+1. **官方方式（最简单）**：在小程序里走一次登录流程，抓包看
+   `POST /front/user/getOpenId?code=<wx.login 的 code>` 的返回里 `result.openId`。
+   微信的 `code` 只能用一次、约 5 分钟过期，需要在客户端侧同步抓取。
+2. **开发者工具**：用微信开发者工具打开该小程序（需有该小程序的开发权限），
+   在 Console 里执行 `wx.getStorageSync('openId')`。
+3. **真机调试**：在已 root 的测试机上运行该小程序后，从运行进程内存中提取
+   `openId` 字段。这一步涉及对第三方客户端的内存读取，**仅在你自己的设备上、
+   且你已获得授权时进行**。
 
-设备 ID 三种注入方式，优先级 **命令行 > 环境变量 > `.env`**：
-
-```bash
-.venv/bin/python main.py info                            # 用 config/.env 里的值
-NOFETEL_DEVID=<DEVICE_ID> .venv/bin/python main.py info   # 环境变量覆盖
-.venv/bin/python main.py --dev-id <DEVICE_ID> info        # 命令行优先
-```
-
-`openId` / `sessionKey` **不进 `.env`**：在无 POSIX 权限位的磁盘（NTFS/exFAT）上
-`chmod 600` 是空操作，文件对该机所有用户可读。判定与分级见 `docs/配置与凭据.md`。
+拿到后填进 `config/.env` 的 `NOFETEL_OPENID=`，或按上面的方式设为环境变量。
+无论哪种方式，都不要把 openId 提交进版本库（`.gitignore` 已排除 `config/.env`）。
 
 ## 两种使用方式
 

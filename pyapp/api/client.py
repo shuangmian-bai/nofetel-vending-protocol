@@ -61,6 +61,11 @@ class NoftelConfig:
     ble_service: str = "0000AE01-0000-1000-8000-00805F9B34FB"
     ble_notify: str = "0000AE02-0000-1000-8000-00805F9B34FB"
     ble_write: str = "0000AE01-0000-1000-8000-00805F9B34FB"
+    # 身份标识（openId）。两种来源，按优先级：
+    #   1) 环境变量 NOFETEL_OPENID（推荐：不落盘，适合共享机器）
+    #   2) config/.env 里的 NOFETEL_OPENID（简单，但要求该文件的 chmod 真实生效）
+    # repr=False：避免日志/异常里打印整个配置对象时泄漏
+    open_id: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls) -> "NoftelConfig":
@@ -84,6 +89,7 @@ class NoftelConfig:
             ble_service=env.get("NOFETEL_BLE_SERVICE", cls.ble_service),
             ble_notify=env.get("NOFETEL_BLE_NOTIFY", cls.ble_notify),
             ble_write=env.get("NOFETEL_BLE_WRITE", cls.ble_write),
+            open_id=env.get("NOFETEL_OPENID", "").strip(),
         )
 
 
@@ -91,8 +97,11 @@ class NoftelConfig:
 class NoftelClient:
     """单一请求出口。
 
-    openId 从环境变量 VAULT_NOFETEL_OPENID 读取（由 `vault use nofetel_openid -- python main.py ...`
-    注入子进程环境）。代码里不放默认值，避免凭据硬编码。
+    openId 取值顺序：
+      1) 调用方显式传入的 open_id 参数；
+      2) 环境变量 NOFETEL_OPENID（推荐，不落盘）；
+      3) config/.env 里的 NOFETEL_OPENID（由 NoftelConfig 读入）。
+    代码里不放任何默认值，避免凭据硬编码。
     """
 
     config: NoftelConfig
@@ -102,7 +111,7 @@ class NoftelClient:
 
     def __post_init__(self) -> None:
         if not self.open_id:
-            self.open_id = os.environ.get("VAULT_NOFETEL_OPENID", "").strip()
+            self.open_id = os.environ.get("NOFETEL_OPENID", "").strip() or self.config.open_id
         if not self.qr_code:
             self.qr_code = f"https://c.youzhuyougou.com/mini/1/?devid={self.config.dev_id}"
         self._http = httpx.Client(timeout=DEFAULT_TIMEOUT, follow_redirects=True)

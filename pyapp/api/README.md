@@ -22,7 +22,7 @@ with NoftelClient(NoftelConfig.from_env()) as c:
 ```
 
 ## 依赖
-`httpx`。openId 来自环境变量 `VAULT_NOFETEL_OPENID`（由 `vault use` 注入）。
+`httpx`。openId 来自环境变量 `NOFETEL_OPENID` 或 `config/.env`（环境变量优先）。
 
 ## 副作用
 无。`__post_init__` 建一个 `httpx.Client`，`close()` 释放。
